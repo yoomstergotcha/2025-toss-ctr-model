@@ -1,0 +1,13 @@
+# Python 패키지 목록
+pandas
+pyarrow
+scikit-learn
+torch
+torchvision
+torchaudio
+pytorch-lightning
+ruamel.yaml
+tqdm
+lightgbm
+matplotlib
+seaborn
