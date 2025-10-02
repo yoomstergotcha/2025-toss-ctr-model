@@ -10,9 +10,9 @@ Two-pass pipeline:
   Pass 1: compute scaling stats + build vocabs
   Pass 2: transform + write sharded outputs
 
-예시 실행:
+예시 실행: (맥북용임)
 python scripts/split_by_modality.py \
-  --input data/raw/train.parquet \
+  --input data/raw/train_9M.parquet \ 
   --output-dir data/processed/train_modality \
   --config configs/config.yaml
   
@@ -30,7 +30,6 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import pyarrow.dataset as ds
-import numpy as np
 import yaml
 
 def ensure_dir(p: Path): p.mkdir(parents=True, exist_ok=True)
@@ -97,6 +96,32 @@ def transform_cont(arr: pa.Array, method: str, stats: Dict[str, float]) -> pa.Ar
         x = pc.divide(pc.subtract(x, pa.scalar(med)), pa.scalar(iqr))
     return x.cast(pa.float32())
 
+def clip_lists(lst_arr: pa.Array, max_len: int, keep: str = "tail") -> pa.Array:
+    py = lst_arr.to_pylist()
+    tail = (keep.lower() != "head")
+    out = []
+    for v in py:
+        if v is None:
+                out.append(None)
+        else:
+                out.append(v[-max_len:] if tail and len(v) > max_len else v[:max_len])
+    return pa.array(out, type=pa.list_(pa.int32()))
+
+def hash_list_tokens(lst_arr: pa.Array, seed: int, buckets: int) -> pa.Array:
+    py = lst_arr.to_pylist()
+    out = []
+    for v in py:
+        if v is None:
+            out.append(None)
+        else:
+            hv = []
+            for t in v:
+                h = pc.hash_array(pa.array([int(t)]), seed=seed)[0].as_py()  # uint64
+                hv.append(int(h % buckets))
+            out.append(hv)
+    return pa.array(out, type=pa.list_(pa.int32()))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True, help="Parquet file or dir")
@@ -123,7 +148,32 @@ def main():
     cont_plan  = cfg.get("continuous", [])
     hash_plan  = cfg.get("categorical_hash", [])
     vocab_cols = cfg.get("categorical_vocab", [])
-    seq_cols   = cfg.get("sequence", [])
+
+    vocab_cfg = cfg.get("vocab_encoding", {})
+    default_mode = vocab_cfg.get("default", "auto")
+    per_col_mode = vocab_cfg.get("per_column", {})
+
+    raw_seq_cfg    = cfg.get("sequence", {})
+    if isinstance(raw_seq_cfg, dict):
+        seq_columns   = raw_seq_cfg.get("columns", []) or []
+        seq_max_len   = int(raw_seq_cfg.get("max_len", 6000))
+        seq_keep      = str(raw_seq_cfg.get("keep", "tail"))
+        seq_buckets   = int(raw_seq_cfg.get("buckets", default_buckets)) if "buckets" in raw_seq_cfg else None
+    elif isinstance(raw_seq_cfg, (list, tuple)):
+        seq_columns   = list(raw_seq_cfg)
+        seq_max_len   = 6000
+        seq_keep      = "tail"
+        seq_buckets   = None
+    elif isinstance(raw_seq_cfg, str):
+        seq_columns   = [raw_seq_cfg]
+        seq_max_len   = 6000
+        seq_keep      = "tail"
+        seq_buckets   = None
+    else:
+        seq_columns   = []
+        seq_max_len   = 6000
+        seq_keep      = "tail"
+        seq_buckets   = None
 
     dataset = ds.dataset(args.input, format="parquet")
 
@@ -160,37 +210,17 @@ def main():
             "continuous": cont_plan,
             "categorical_hash": hash_plan,
             "categorical_vocab": vocab_cols,
-            "sequence": seq_cols,
+            "sequence": {
+                "columns": seq_columns,
+                "max_len": seq_max_len,
+                "keep": seq_keep,
+                "buckets": seq_buckets,
+            },
         },
         "source": str(args.input),
         "rows_per_chunk": rows_per_chunk,
     }
     (meta_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
-
-    def clip_lists(lst_arr: pa.Array, max_len: int, keep: str = "tail") -> pa.Array:
-        py = lst_arr.to_pylist()
-        tail = (keep.lower() != "head")
-        out = []
-        for v in py:
-            if v is None:
-                out.append(None)
-            else:
-                out.append(v[-max_len:] if tail and len(v) > max_len else v[:max_len])
-        return pa.array(out, type=pa.list_(pa.int32()))
-
-    def hash_list_tokens(lst_arr: pa.Array, seed: int, buckets: int) -> pa.Array:
-        py = lst_arr.to_pylist()
-        out = []
-        for v in py:
-            if v is None:
-                out.append(None)
-            else:
-                hv = []
-                for t in v:
-                    h = pc.hash_array(pa.array([int(t)]), seed=seed)[0].as_py()  # uint64
-                    hv.append(int(h % buckets))
-                out.append(hv)
-        return pa.array(out, type=pa.list_(pa.int32()))
 
 
     # ---- PASS 2: transform + write (streaming) ----
@@ -199,7 +229,7 @@ def main():
     needed += [s["name"] for s in cont_plan if s["name"] in dataset.schema.names]
     needed += [s["name"] for s in hash_plan if s["name"] in dataset.schema.names]
     needed += [c for c in vocab_cols if c in dataset.schema.names]
-    needed += [c for c in seq_cols if c in dataset.schema.names]
+    needed += [c for c in seq_columns if c in dataset.schema.names]
     needed = list(dict.fromkeys(needed))
 
     scanner = dataset.scanner(columns=needed)
@@ -238,9 +268,6 @@ def main():
 
 
         # ----- categorical_vocab (with modes) -----
-        vocab_cfg = cfg.get("vocab_encoding", {})
-        default_mode = vocab_cfg.get("default", "auto")
-        per_col_mode = vocab_cfg.get("per_column", {})
 
         voc_cols = []
         for col in vocab_cols:
@@ -279,22 +306,17 @@ def main():
 
 
         # ----- sequence: clip + hash -----
-        seq_cfg    = cfg.get("sequence", {})
-        seq_cols   = seq_cfg.get("columns", []) if isinstance(seq_cfg, dict) else seq_cols
-        seq_maxlen = int(seq_cfg.get("max_len", 6000)) if isinstance(seq_cfg, dict) else 6000
-        seq_keep   = str(seq_cfg.get("keep", "tail")) if isinstance(seq_cfg, dict) else "tail"
-        seq_buckets= int(seq_cfg.get("buckets", default_buckets)) if isinstance(seq_cfg, dict) else None
 
-        raw_cols, hash_cols = [], []
-        for col in seq_cols:
+        raw_cols, seq_hash_cols = [], []
+        for col in seq_columns:
             if col not in tbl.column_names:
                 continue
             lst = to_int_list_array(tbl[col])
-            lst = clip_lists(lst, max_len=seq_maxlen, keep=seq_keep)
+            lst = clip_lists(lst, max_len=seq_max_len, keep=seq_keep)
             raw_cols.append((col, lst))
             if seq_buckets is not None:
                 hashed = hash_list_tokens(lst, seed=hash_seed, buckets=seq_buckets)
-                hash_cols.append((col, hashed))
+                seq_hash_cols.append((col, hashed))
 
         if raw_cols:
             out = pa.table(base)
@@ -303,15 +325,15 @@ def main():
             pq.write_table(out, seq_dir / f"seq_{shard:05d}.parquet", compression="zstd")
 
         # 해시 시퀀스도 저장하려면 out_names.seq_hash 지정 필요
-        if hash_cols and "seq_hash" in out_names:
+        if seq_hash_cols and "seq_hash" in out_names:
             seqh_dir = out_root / out_names["seq_hash"]
             ensure_dir(seqh_dir)
             out = pa.table(base)
-            for col, a in hash_cols:
+            for col, a in seq_hash_cols:
                 out = out.append_column(col, a)
             pq.write_table(out, seqh_dir / f"seq_hash_{shard:05d}.parquet", compression="zstd")
 
-            print("Done:", args.output_dir)
+    print("Done:", args.output_dir)
 
-        if __name__ == "__main__":
-            main()
+if __name__ == "__main__":
+    main()

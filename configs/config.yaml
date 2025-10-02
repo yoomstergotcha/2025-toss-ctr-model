@@ -1,13 +1,11 @@
-
-
 # ==============================
 # split_by_modality.py 설정 파일
 # ==============================
 
-rid_col: "RID"          # 학습용 parquet의 unique id
-label_col: "clicked"    # train에는 존재, test에서는 "" 로 둠
+rid_col: "RID" # 학습용 parquet의 unique id
+label_col: "clicked" # train에는 존재, test에서는 "" 로 둠
 
-rows_per_chunk: 400000   # 청크 단위 처리 (메모리 상황에 맞게 조정)
+rows_per_chunk: 400000 # 청크 단위 처리 (메모리 상황에 맞게 조정)
 hash_num_buckets: 1048576
 hash_seed: 17
 
@@ -16,6 +14,7 @@ out_names:
   cat_hash: "cat_hash"
   cat_vocab: "cat_vocab"
   seq: "seq"
+  seq_hash: "seq_hash"
   meta: "meta"
 
 # ------------------------------
@@ -34,7 +33,7 @@ continuous:
 
   - { name: "feat_c_1", method: "standard" }
   - { name: "feat_c_2", method: "standard" }
-  
+
   - { name: "feat_c_3", method: "standard" }
   - { name: "feat_c_4", method: "standard" }
   - { name: "feat_c_5", method: "standard" }
@@ -53,7 +52,7 @@ continuous:
   - { name: "feat_e_8", method: "standard" }
   - { name: "feat_e_9", method: "robust" }
   - { name: "feat_e_10", method: "standard" }
-  
+
   - { name: "history_a_1", method: "standard" }
   - { name: "history_a_2", method: "standard" }
   - { name: "history_a_3", method: "standard" }
@@ -173,16 +172,7 @@ vocab_encoding:
 # ------------------------------
 sequence:
   columns: ["seq"]
-  max_len: 6000    # 99% 절단 기준
-  keep: "tail"     # 최근 행동 유지
+  max_len: 6000 # 99% 절단 기준
+  keep: "tail" # 최근 행동 유지
   buckets: 1048576 # hash embedding bucket 크기
-
-
-out_names:
-  cont: "cont"
-  cat_hash: "cat_hash"
-  cat_vocab: "cat_vocab"
-  seq: "seq"
-  seq_hash: "seq_hash"   # ← 추가 (해시 시퀀스도 저장할 때만)
-  meta: "meta"
 
